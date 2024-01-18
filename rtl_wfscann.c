@@ -8,13 +8,17 @@
 #include <pthread.h>
 #include <math.h>
 #include <unistd.h>
+#include <png.h>
 
 //##################################main variables
-bool continually = 0;
-bool gnuplot = 0;
-int output_format = _TXT_FORMAT_;
-char *output_file = NULL;
-int interval_seconds = -1;
+struct globalsinfo{
+	bool _continually = 0;
+	bool _gnuplot = 0;
+	bool _truncatefile = 0;
+	int _output_format = _TXT_FORMAT_;
+	char *_output_file = NULL;
+	int _interval_seconds = -1;
+}globals;
 //##################################RTL variables
 static rtlsdr_dev_t *rtl_dev;
 struct rtlinfo{
@@ -104,6 +108,95 @@ static int rtlsdr_init(){
 	return 0;
 }
 
+//##################################function for images
+struct ImageData{
+    int _width;
+	int _height = 1;
+	int _actualLine;
+    uint8_t** _data; // Tableau 1D de pixels (4 canaux par pixel)
+	uint8_t _compress;
+	int _max_value_db;
+	int _min_value_db;
+	double _scaleFttToPng; //255.0 / (max_value_db - min_value_db)
+} Image;
+
+void Init_image_data(int width, int height = 1, uint8_t compress = 0, int max_value_db = 0, int min_value_db = -110)
+{
+	Image._width = width;
+	Image._height = height;
+	Image._compress = compress;
+	Image._max_value_db = max_value_db;
+	Image._min_value_db = min_value_db;
+	Image._actualLine = 0;
+	Image._scaleFttToPng = 255.0 / (max_value_db - (min_value_db));
+	Image._data = (uint8_t**)malloc(height * sizeof(uint8_t *));
+	for (int i = 0; i < height; ++i){
+		Image._data[i] = (uint8_t*)calloc(width * 4, sizeof(uint8_t));
+	}
+}
+
+void convert_db_data_to_image_png(FILE *fp,double* fftw_data) {
+	
+	//prep data
+	if(Image._data[Image._actualLine]){
+		Image._data[Image._actualLine] = (uint8_t*)malloc(Image._width * 4);
+	}
+    for (int i = 0; i < Image._width; ++i) {
+        int index = (int)(((fftw_data[i] - Image._min_value_db) * Image._scaleFttToPng));
+        index = (index < 0) ? 0 : ((index > 255) ? 255 : index);
+        int base_index = i * 4;
+        Image._data[Image._actualLine][base_index] = websdrWaterfall[index][0];
+        Image._data[Image._actualLine][base_index + 1] = websdrWaterfall[index][1];
+        Image._data[Image._actualLine][base_index + 2] = websdrWaterfall[index][2];
+        Image._data[Image._actualLine][base_index + 3] = 255; // Alpha
+    }
+	Image._actualLine = (Image._actualLine < Image._height) ? (Image._actualLine + 1) : 0;	
+	
+	//write data
+	if (!fp) {
+        fprintf(stderr, "Error opening file for writing.\n");
+        return;
+    }
+    png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!png) {
+        fprintf(stderr, "Error creating PNG structure.\n");
+        return;
+    }
+    png_infop info = png_create_info_struct(png);
+    if (!info) {
+        fprintf(stderr, "Error creating PNG information structure.\n");
+        png_destroy_write_struct(&png, NULL);
+        return;
+    }
+    if (setjmp(png_jmpbuf(png))) {
+        fprintf(stderr, "Error initializing data for writing PNG.\n");
+        png_destroy_write_struct(&png, &info);
+        return;
+    }
+    png_init_io(png, fp);
+    png_set_IHDR(
+        png,
+        info,
+        Image._width, Image._height,
+        8, PNG_COLOR_TYPE_RGBA, PNG_INTERLACE_NONE,
+        PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT
+    );
+    png_write_info(png, info);
+	int index=0;
+    for (int y = Image._actualLine; y < Image._height; y++) {
+        png_write_row(png, Image._data[index]);
+		index++;
+    }
+    for (int y = 0; y < Image._actualLine-1; y++) {
+        png_write_row(png, Image._data[index]);
+		index++;
+    }
+	
+    png_write_end(png, NULL);
+    png_destroy_write_struct(&png, &info);
+}
+
+
 //##################################function for options
 void help() {
     printf("Usage: rtl_wfscann [OPTIONS]\n");
@@ -121,7 +214,8 @@ void help() {
     printf("  -O, --output FILE        Set output file\n");
     printf("  -I, --interval SECONDS   Set measurement interval in seconds 0 or -1 is disable as default\n");
     printf("  -F, --format FORMAT      Set output format (TXT, IMG, RAW) default is TXT\n");
-    printf("\nExample:\n");
+    printf("  -T, --truncatefile       Set truncated output filename like timestamp_filename.txt\n");    
+	printf("\nExample:\n");
     printf("./rtl_wfscann -f 143000000:147000000:2000 -g 10\n");
     printf("./rtl_wfscann -f 143000000:147000000:2000 -g 10 -c -G -o output.txt -i 5 -F TXT\n");
 }
@@ -132,7 +226,7 @@ void validateFreqOption(char *freqRange) {
     if (token != NULL) {
         rtl._freq_start = atoi(token);
     } else {
-        fprintf(stderr, "#Erreur: Valeur manquante pour --freq\n");
+        fprintf(stderr, "#Error: Missing value for --freq\n");
         help();
         exit(1);
     }
@@ -142,7 +236,7 @@ void validateFreqOption(char *freqRange) {
     if (token != NULL) {
         rtl._freq_stop = atoi(token);
     } else {
-        fprintf(stderr, "#Erreur: Valeur manquante pour --freq\n");
+        fprintf(stderr, "#Error: Missing value for --freq\n");
         help();
         exit(1);
     }
@@ -152,13 +246,13 @@ void validateFreqOption(char *freqRange) {
     if (token != NULL) {
         fftw._bin_width = atoi(token);
     } else {
-        fprintf(stderr, "#Erreur: Valeur manquante pour --freq\n");
+        fprintf(stderr, "#Error: Missing value for --freq\n");
         help();
         exit(1);
     }
 
     if (rtl._freq_start < 0 || rtl._freq_stop < 0 || fftw._bin_width <= 0 || rtl._freq_start >= rtl._freq_stop) {
-        fprintf(stderr, "#Erreur: Les valeurs de --freq ne sont pas valides\n");
+        fprintf(stderr, "#Error: Values for --freq are invalid\n");
         help();
         exit(1);
     }
@@ -167,9 +261,9 @@ void validateFreqOption(char *freqRange) {
 	while((rtl._freq_start+adjustedBandwidth*rtl._rate)<rtl._freq_stop)adjustedBandwidth++;
 	rtl._freq_stop = rtl._freq_start+adjustedBandwidth*rtl._rate;
 
-    printf("#rtl._freq_start: %d\n", rtl._freq_start);
-    printf("#rtl._freq_stop: %d\n", rtl._freq_stop);
-    printf("#fftw._bin_width: %d\n", fftw._bin_width);
+    printf("#Frequency start : %d\n", rtl._freq_start);
+    printf("#Frequency stop  : %d\n", rtl._freq_stop);
+    printf("#FFT binary width: %d\n", fftw._bin_width);
 }
 
 int validateFormatOption(const char *format) {
@@ -205,11 +299,37 @@ int validateFFTWindowingOption(const char *window) {
     }
 }
 
+char* generateFileNameWithTimestamp(const char* _output_file) {
+    if (_output_file == NULL) {
+        return NULL;
+    }
+    time_t timestamp = time(NULL);
+    struct tm* timeinfo = localtime(&timestamp);
+    if (timeinfo == NULL) {
+        return NULL;
+    }
+    char timestampStr[20];
+    strftime(timestampStr, sizeof(timestampStr), "%Y%m%d%H%M%S", timeinfo);
+    size_t newFileNameLen = strlen(_output_file) + 20 + 2;
+    char* newFileName = (char*)malloc(newFileNameLen);
+    if (newFileName == NULL) {
+        return NULL;
+    }
+    const char* lastSlash = strrchr(_output_file, '/');
+    if (lastSlash != NULL) {
+        size_t prefixLen = lastSlash - _output_file + 1;
+        strncpy(newFileName, _output_file, prefixLen);
+        sprintf(newFileName + prefixLen, "%s_%s", timestampStr, lastSlash + 1);
+    } else {
+        sprintf(newFileName, "%s_%s", timestampStr, _output_file);
+    }
+    return newFileName;
+}
 //##################################main
 const double *generateFFTWindow(int length, int windowType) {
     double *window = (double *)malloc(length * sizeof(double));
     if (window == NULL) {
-        fprintf(stderr, "Erreur d'allocation de mémoire pour la fenêtre\n");
+        fprintf(stderr, "Memory allocation error for FFT window.\n");
         exit(1);
     }
 
@@ -251,7 +371,7 @@ const double *generateFFTWindow(int length, int windowType) {
             break;
 
         default:
-            fprintf(stderr, "Type de fenêtre non pris en charge\n");
+            fprintf(stderr, "Unsupported window type.\n");
             exit(1);
     }
 
@@ -262,10 +382,6 @@ void* processPrepSamples(void* args) {
     struct ThreadArgs* threadArgs = (struct ThreadArgs*)args;
     int FFT_samplesPerSlice = threadArgs->FFT_samplesPerSlice;
     for (int i = threadArgs->start; i < threadArgs->end; i++) {
-		if (threadArgs->all_fftin[i] == NULL) {
-			fprintf(stderr, "Erreur d'allocation de mémoire pour le buffer d'échantillons\n");
-			exit(1);
-		}
         for (int j = 0; j < FFT_samplesPerSlice; j++) {
 			threadArgs->all_fftin[i][j][_Q_] = (threadArgs->samplesBuffer[i][j*2] - 127.4) * (1.0 / 128.0) * fftw._window[j];
 			threadArgs->all_fftin[i][j][_I_] = (threadArgs->samplesBuffer[i][j*2+1] - 127.4) * (1.0 / 128.0) * fftw._window[j];
@@ -279,9 +395,9 @@ void* processPrepSamples(void* args) {
 struct timeval start_time, end_time;
 void ReadAndRun(){
 
-	//////////////////
-	gettimeofday(&start_time, NULL);
-	//////////////////
+	// //////////////////
+	// gettimeofday(&start_time, NULL);
+	// //////////////////
 		
 	int n_read=0;
 	for (int j = 0; j < fftw._SPS_numSlices; j=j+fftw._avg) {
@@ -289,23 +405,23 @@ void ReadAndRun(){
 		rtlsdr_reset_buffer(rtl_dev);
 		for (int i = 0; i < fftw._avg; i++) {
 			if (rtlsdr_read_sync(rtl_dev, rtl._samplesBuffer[j+i], fftw._SPS_samplesPerSlice, &n_read) < 0) {
-				fprintf(stderr, "Erreur lors de la lecture des échantillons\n");		
+				fprintf(stderr, "Memory allocation error for sample buffer.\n");		
 			}
 			if(n_read!=fftw._SPS_samplesPerSlice){
-				fprintf(stderr, "Erreur lors de la lecture des échantillons %d/%d\n",n_read,fftw._SPS_samplesPerSlice);		
+				fprintf(stderr, "Error reading samples %d/%d.\n",n_read,fftw._SPS_samplesPerSlice);		
 			}
 		}
 	}
 
-	////////////////////////////////////
-	gettimeofday(&end_time, NULL);
-	long elapsed_time = (end_time.tv_sec - start_time.tv_sec) * 1000000L + (end_time.tv_usec - start_time.tv_usec);
-	double elapsed_time_seconds = (double)elapsed_time / 1000000.0;
-	printf("#Temps d'exécution : %.6f microsecondes\n", elapsed_time_seconds);
-	////////////////////////////////////
-	//////////////////
-	gettimeofday(&start_time, NULL);
-	//////////////////
+	// ////////////////////////////////////
+	// gettimeofday(&end_time, NULL);
+	// long elapsed_time = (end_time.tv_sec - start_time.tv_sec) * 1000000L + (end_time.tv_usec - start_time.tv_usec);
+	// double elapsed_time_seconds = (double)elapsed_time / 1000000.0;
+	// printf("#Execution time : %.6f microsecondes\n", elapsed_time_seconds);
+	// ////////////////////////////////////
+	// //////////////////
+	// gettimeofday(&start_time, NULL);
+	// //////////////////
 	
 	iterationsPerThread = fftw._SPS_numSlices / numThreads;
 	remainingIterations = fftw._SPS_numSlices % numThreads;  
@@ -333,15 +449,15 @@ void ReadAndRun(){
         pthread_join(threads[i], NULL);
     }
 
-	////////////////////////////////////
-	gettimeofday(&end_time, NULL);
-	elapsed_time = (end_time.tv_sec - start_time.tv_sec) * 1000000L + (end_time.tv_usec - start_time.tv_usec);
-	elapsed_time_seconds = (double)elapsed_time / 1000000.0;
-	printf("#Temps d'exécution : %.6f microsecondes\n", elapsed_time_seconds);
-	////////////////////////////////////
-	//////////////////
-	gettimeofday(&start_time, NULL);
-	//////////////////
+	// ////////////////////////////////////
+	// gettimeofday(&end_time, NULL);
+	// elapsed_time = (end_time.tv_sec - start_time.tv_sec) * 1000000L + (end_time.tv_usec - start_time.tv_usec);
+	// elapsed_time_seconds = (double)elapsed_time / 1000000.0;
+	// printf("#Execution time : %.6f \n", elapsed_time_seconds);
+	// ////////////////////////////////////
+	// //////////////////
+	// gettimeofday(&start_time, NULL);
+	// //////////////////
 	
 	for (int i = 0; i < fftw._SPS_numSlices; i++) {
 		fftw_execute_dft(fftPlan, fftw._all_fftin[i], fftw._fftout);
@@ -354,15 +470,15 @@ void ReadAndRun(){
 		}
 	}
 	
-	////////////////////////////////////
-	gettimeofday(&end_time, NULL);
-	elapsed_time = (end_time.tv_sec - start_time.tv_sec) * 1000000L + (end_time.tv_usec - start_time.tv_usec);
-	elapsed_time_seconds = (double)elapsed_time / 1000000.0;
-	printf("#Temps d'exécution : %.6f microsecondes\n", elapsed_time_seconds);
-	////////////////////////////////////
-	//////////////////
-	gettimeofday(&start_time, NULL);
-	//////////////////
+	// ////////////////////////////////////
+	// gettimeofday(&end_time, NULL);
+	// elapsed_time = (end_time.tv_sec - start_time.tv_sec) * 1000000L + (end_time.tv_usec - start_time.tv_usec);
+	// elapsed_time_seconds = (double)elapsed_time / 1000000.0;
+	// printf("#Execution time : %.6f \n", elapsed_time_seconds);
+	// ////////////////////////////////////
+	// //////////////////
+	// gettimeofday(&start_time, NULL);
+	// //////////////////
 	
 	for (int i = 0; i < fftw._FFT_numSlices; i++) {
 		for (int j = 0; j < fftw._FFT_samplesPerSlice; j++) {
@@ -370,40 +486,61 @@ void ReadAndRun(){
 		}
 	}
 	
-	////////////////////////////////////
-	gettimeofday(&end_time, NULL);
-	elapsed_time = (end_time.tv_sec - start_time.tv_sec) * 1000000L + (end_time.tv_usec - start_time.tv_usec);
-	elapsed_time_seconds = (double)elapsed_time / 1000000.0;
-	printf("#Temps d'exécution : %.6f microsecondes\n", elapsed_time_seconds);
-	////////////////////////////////////
-	//////////////////
-	gettimeofday(&start_time, NULL);
-	//////////////////
+	// ////////////////////////////////////
+	// gettimeofday(&end_time, NULL);
+	// elapsed_time = (end_time.tv_sec - start_time.tv_sec) * 1000000L + (end_time.tv_usec - start_time.tv_usec);
+	// elapsed_time_seconds = (double)elapsed_time / 1000000.0;
+	// printf("#Execution time : %.6f \n", elapsed_time_seconds);
+	// ////////////////////////////////////
+	// //////////////////
+	// gettimeofday(&start_time, NULL);
+	// //////////////////
 	
-	switch (output_format) {
-		case _TXT_FORMAT_:
-			if(gnuplot){printf("e\nplot \"-\"\n");}
-			for (int i = 0; i < fftw._FFT_numSlices*fftw._FFT_samplesPerSlice; i++) {
-				printf("%d %f\n", rtl._freq_start + (i * fftw._bin_width), fftw._dB_fftw_out[i]); 
+	if(globals._output_file) {
+		FILE *fichier = NULL;
+		if(globals._truncatefile){
+			fichier = fopen(generateFileNameWithTimestamp(globals._output_file), "w");
+		}else{
+			fichier = fopen(globals._output_file, "w");
 			}
-			break;
-		case _IMG_FORMAT_:
-			printf("#IMG OUTPUT\n");
-			///////////////////////////////////////////////////////
-			break;
-		case _RAW_FORMAT_:
-			fwrite(fftw._dB_fftw_out, sizeof(double), fftw._FFT_numSlices * fftw._FFT_samplesPerSlice, stdout);
-			break;
-		default:
-			break;
-		}
-		
-	////////////////////////////////////
-	gettimeofday(&end_time, NULL);
-	elapsed_time = (end_time.tv_sec - start_time.tv_sec) * 1000000L + (end_time.tv_usec - start_time.tv_usec);
-	elapsed_time_seconds = (double)elapsed_time / 1000000.0;
-	printf("#Temps d'exécution : %.6f microsecondes\n", elapsed_time_seconds);
-	////////////////////////////////////
+		switch (globals._output_format) {
+			case _TXT_FORMAT_:
+				for (int i = 0; i < fftw._FFT_numSlices*fftw._FFT_samplesPerSlice; i++) {
+					fprintf(fichier, "%d %f\n", rtl._freq_start + (i * fftw._bin_width), fftw._dB_fftw_out[i]);
+				}
+				break;
+			case _IMG_FORMAT_:
+				convert_db_data_to_image_png(fichier,fftw._dB_fftw_out);
+				break;
+			case _RAW_FORMAT_:
+				fwrite(fftw._dB_fftw_out, sizeof(double), fftw._FFT_numSlices * fftw._FFT_samplesPerSlice, fichier);
+				break;
+			default:
+				break;
+			}
+		fclose(fichier);
+	}
+	else{
+		switch (globals._output_format) {
+			case _TXT_FORMAT_:
+				if(globals._gnuplot){printf("e\nplot \"-\"\n");}
+				for (int i = 0; i < fftw._FFT_numSlices*fftw._FFT_samplesPerSlice; i++) {
+					printf("%d %f\n", rtl._freq_start + (i * fftw._bin_width), fftw._dB_fftw_out[i]); 
+				}
+				break;
+			case _RAW_FORMAT_:
+				fwrite(fftw._dB_fftw_out, sizeof(double), fftw._FFT_numSlices * fftw._FFT_samplesPerSlice, stdout);
+				break;
+			default:
+				break;
+			}
+	}
+	// ////////////////////////////////////
+	// gettimeofday(&end_time, NULL);
+	// elapsed_time = (end_time.tv_sec - start_time.tv_sec) * 1000000L + (end_time.tv_usec - start_time.tv_usec);
+	// elapsed_time_seconds = (double)elapsed_time / 1000000.0;
+	// printf("#Execution time : %.6f \n", elapsed_time_seconds);
+	// ////////////////////////////////////
 	
 }
 
@@ -418,7 +555,7 @@ void VarAndBuffInit(){
 	
 	rtl._currentFreq = (int *)malloc(fftw._SPS_numSlices * sizeof(int));
 	if (rtl._currentFreq == NULL) {
-		fprintf(stderr, "Erreur d'allocation de mémoire pour _currentFreq\n");
+		fprintf(stderr, "Memory allocation error for frequencies index.\n");
 		exit(1);
 	}
 	for (int j = 0; j < fftw._SPS_numSlices; j=j+fftw._avg) {
@@ -429,50 +566,87 @@ void VarAndBuffInit(){
 
 	rtl._samplesBuffer = (uint8_t **)malloc(fftw._SPS_numSlices * sizeof(uint8_t *));
     if (rtl._samplesBuffer == NULL) {
-        fprintf(stderr, "Erreur d'allocation de mémoire pour le buffer d'échantillons\n");
+        fprintf(stderr, "Memory allocation error for sample buffer.\n");
         exit(1);
     }
 	
 	for (int i = 0; i < fftw._SPS_numSlices; i++) {
 		rtl._samplesBuffer[i] = (uint8_t *)malloc(fftw._SPS_samplesPerSlice * sizeof(uint8_t));
         if (rtl._samplesBuffer[i] == NULL) {
-            fprintf(stderr, "Erreur d'allocation de mémoire pour le buffer d'échantillons\n");
+            fprintf(stderr, "Memory allocation error for sample buffer.\n");
             exit(1);
         }
 	}
 	
 	fftw._all_fftin = (fftw_complex **)fftw_malloc(fftw._SPS_numSlices * sizeof(fftw_complex *));
 	if (fftw._all_fftin == NULL) {
-        fprintf(stderr, "Erreur d'allocation de mémoire pour le buffer d'échantillons\n");
+        fprintf(stderr, "Memory allocation error for fft input buffer.\n");
         exit(1);
     }
 	for (int i = 0; i < fftw._SPS_numSlices; i++) {
 		fftw._all_fftin[i]= (fftw_complex *)fftw_malloc(fftw._FFT_samplesPerSlice * sizeof(fftw_complex));
+        if (fftw._all_fftin[i] == NULL) {
+            fprintf(stderr, "Memory allocation error for fft input buffer.\n");
+            exit(1);
+        }
 	}
 	
 	fftw._fftout = (fftw_complex *)fftw_malloc(fftw._FFT_samplesPerSlice * sizeof(fftw_complex));
     if (fftw._fftout == NULL) {
-        fprintf(stderr, "Erreur d'allocation de mémoire pour le buffer d'échantillons\n");
+        fprintf(stderr, "Memory allocation error for fft output buffer\n");
         exit(1);
     }
 	
 	fftw._pwr_fftw_out = (double **)malloc(fftw._FFT_numSlices * sizeof(double *));
     if (fftw._pwr_fftw_out == NULL) {
-        fprintf(stderr, "Erreur d'allocation de mémoire pour le buffer d'échantillons\n");
+        fprintf(stderr, "Memory allocation error for fft power values.\n");
         exit(1);
     }
 	for (int i = 0; i < fftw._FFT_numSlices; i++) {
 		fftw._pwr_fftw_out[i] = (double *)calloc(fftw._FFT_samplesPerSlice,sizeof(double));
+		if (fftw._pwr_fftw_out[i] == NULL) {
+			fprintf(stderr, "Memory allocation error for fft power values.\n");
+			exit(1);
+		}
 	}
 	
 	numThreads = sysconf(_SC_NPROCESSORS_ONLN);
 	threads = (pthread_t*)malloc(numThreads * sizeof(pthread_t));
 	threadArgsArray = (struct ThreadArgs*)malloc(numThreads * sizeof(struct ThreadArgs));
 	if (threadArgsArray == NULL) {
-		fprintf(stderr, "Erreur d'allocation thread for prep samples\n");
+		fprintf(stderr, "Thread allocation error for prep threads.\n");
+		exit(1);
 	}
 	
 	fftw._dB_fftw_out = (double *)calloc(fftw._FFT_numSlices*fftw._FFT_samplesPerSlice,sizeof(double));
+	if (fftw._dB_fftw_out == NULL) {
+		fprintf(stderr, "Memory allocation error for fft power values in dB.\n");
+		exit(1);
+	}
+	
+	if(globals._output_file) {
+		
+		char* new_filename = (char*)malloc(strlen(globals._output_file) + strlen(".info") + 1);
+		strcpy(new_filename, globals._output_file);strcat(new_filename, ".info");
+		
+		FILE *fichier = fopen(new_filename, "w");
+		printf("#File name: %s\n", globals._output_file);
+		if (fichier == NULL) {
+			fprintf(stderr, "Impossible to open the file.\n");
+			exit(1);
+		}
+		fprintf(fichier, "freq_start:%d\nfreq_stop:%d\nbin_bandwith:%d\ntotal_samples:%d\n", rtl._freq_start, rtl._freq_stop,fftw._bin_width,fftw._FFT_numSlices*fftw._FFT_samplesPerSlice);
+		fclose(fichier);
+		
+		if(globals._output_format == _IMG_FORMAT_){
+			if(globals._truncatefile){
+			//  Init_image_data(int width , int height = 1, uint8_t compress = 0, int max_value_db = 0, int min_value_db = -110)
+				Init_image_data(fftw._FFT_numSlices*fftw._FFT_samplesPerSlice, 1    , 0, 0, -110);
+			}else{
+				Init_image_data(fftw._FFT_numSlices*fftw._FFT_samplesPerSlice, 86400, 0, 0, -110);
+			}
+		}
+	}
 
 }
 
@@ -522,18 +696,19 @@ int main(int argc, char * argv[]) {
 			{"output", required_argument, 0, 'O'},
 			{"interval", required_argument, 0, 'I'},
 			{"format", required_argument, 0, 'F'},
+			{"truncatefile", no_argument, 0, 'T'},
 			{0, 0, 0, 0}
         };
 	int option_index = 0;
 
-    while ((x = getopt_long(argc, argv, "hcd:f:g:p:r:w:a:GO:I:F:", long_options, &option_index)) != -1){
+    while ((x = getopt_long(argc, argv, "hcd:f:g:p:r:w:a:GO:I:F:T", long_options, &option_index)) != -1){
         switch (x) {
         case 'h':
             help();
             exit(0);
             break;
         case 'c':
-			continually = 1;
+			globals._continually = 1;
             break;
         case 'd':
             rtl._device = atoi(optarg);
@@ -557,17 +732,20 @@ int main(int argc, char * argv[]) {
             fftw._avg = atoi(optarg);
             break;
 		case 'G':
-			gnuplot = 1;
-			output_format = _TXT_FORMAT_;
+			globals._gnuplot = 1;
+			globals._output_format = _TXT_FORMAT_;
 			break;
 		case 'O':
-			output_file = optarg;
+			globals._output_file = optarg;
 			break;
 		case 'I':
-			interval_seconds = atoi(optarg);
+			globals._interval_seconds = atoi(optarg);
 			break;
 		case 'F':
-			if(!gnuplot){output_format = validateFormatOption(optarg);}
+			if(!globals._gnuplot){globals._output_format = validateFormatOption(optarg);}
+			break;
+		case 'T':
+			globals._truncatefile = 1;
 			break;
         default:
             help();
@@ -581,9 +759,9 @@ int main(int argc, char * argv[]) {
 	while (cont) {
 		time_t start_time = time(NULL);
 		ReadAndRun();
-		if (interval_seconds > 0) {
+		if (globals._interval_seconds > 0) {
 			time_t elapsed_time = time(NULL) - start_time;
-			int sleep_time = interval_seconds - elapsed_time;
+			int sleep_time = globals._interval_seconds - elapsed_time;
 			if (sleep_time > 0) {
 				sleep(sleep_time);
 			} else {
@@ -591,7 +769,7 @@ int main(int argc, char * argv[]) {
 			}		
 		}
 		
-		cont = continually;
+		cont = globals._continually;
 	}
 	
 	VarAndBuffDeInit();

@@ -4,7 +4,7 @@ EXECUTABLE = rtl_wfscann
 
 CFLAGS += -Wall -Wextra -g -O0 
 # CFLAGS += -O3 -march=native -mtune=native
-LDLIBS += -lm -lfftw3 -lfftw3_threads -lpthread -lrtlsdr  
+LDLIBS += -lm -lfftw3 -lpthread -lrtlsdr -lpng
 
 INSTALL=install
 INSTALL_PROGRAM=$(INSTALL)
