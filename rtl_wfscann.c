@@ -27,10 +27,11 @@ static rtlsdr_dev_t *rtl_dev;
 struct rtlinfo{
 	int _rate = 2048000;
 	int _device = 0; 
-	int _freq_start = 125000000; 
-	int _freq_stop = 125000000; 
-	int _freq_start_with_overlap = 125000000; 
-	int _freq_stop_with_overlap = 125000000; 
+	int _freq_start = 144000000; 
+	int _freq_stop = 146000000; 
+	int _freq_start_with_overlap = 144000000; 
+	int _freq_stop_with_overlap = 146048000; 
+	int _freq_stop_adjusted = 146048000;
 	int _gain = 0; 
 	int _ppm = 0;
 	uint8_t **_samplesBuffer;
@@ -56,6 +57,7 @@ struct fftwInfo {
 	int _FFT_remove_binperslice = 0;
 	int _FFT_final_binperslice = 0;
 	int _FFT_final_binTotal  = 0;
+	int _FFT_final_binTotal_Without_excess  = 0;
 }fftw;
 fftw_plan fftPlan = NULL;
 
@@ -296,13 +298,13 @@ void validateFreqOption(char *freqRange) {
 
 	int adjustedBandwidth = 0;
 	while((rtl._freq_start+adjustedBandwidth*(rtl._rate-(rtl._rate*fftw._FFT_overlap)/100))<rtl._freq_stop)adjustedBandwidth++;
-	rtl._freq_stop = rtl._freq_start+adjustedBandwidth*(rtl._rate-(rtl._rate*fftw._FFT_overlap)/100);
+	rtl._freq_stop_adjusted = rtl._freq_start+adjustedBandwidth*(rtl._rate-(rtl._rate*fftw._FFT_overlap)/100);
 	
-	rtl._freq_stop_with_overlap = rtl._freq_stop + (rtl._rate*(fftw._FFT_overlap/2))/100; 
+	rtl._freq_stop_with_overlap = rtl._freq_stop_adjusted + (rtl._rate*(fftw._FFT_overlap/2))/100; 
 
     printf("#Frequency start : %dhz / overlap to %dhz \n", rtl._freq_start, rtl._freq_start_with_overlap);
-    printf("#Frequency stop  : %dhz / overlap to %dhz \n", rtl._freq_stop, rtl._freq_stop_with_overlap);
-    printf("#FFT binary width: %d\n", fftw._bin_width);
+    printf("#Frequency stop  : %dhz / adjusted at adjusted to %dhz and overlap to %dhz \n", rtl._freq_stop, rtl._freq_stop_adjusted, rtl._freq_stop_with_overlap);
+    printf("#FFT final %d binaries width: %d\n", (rtl._freq_stop - rtl._freq_start)/fftw._bin_width,fftw._bin_width);
 }
 
 void validateFormatOption(const char *format) {
@@ -476,15 +478,11 @@ void ReadAndRun(){
 	for (int i = 0; i < fftw._SPS_numSlices; i++) {
 		fftw_execute_dft(fftPlan, fftw._all_fftin[i], fftw._fftout);
 		int index = i / fftw._avg;
-		int ovstart = fftw._FFT_remove_binperslice/2;
-		int ovstop = fftw._FFT_remove_binperslice/2;
-		if(index==0){ovstart=0;}
-		if(index==(fftw._SPS_numSlices-1)/ fftw._avg){ovstop=0;}
 		int k = 0;
-		for (int j = ovstart; j < fftw._FFT_samplesPerSlice-ovstop; j++) {
+		for (int j = fftw._FFT_remove_binperslice/2; j < fftw._FFT_samplesPerSlice-fftw._FFT_remove_binperslice/2; j++) {
 			if(j<(fftw._FFT_samplesPerSlice/2)) {k=(fftw._FFT_samplesPerSlice/2)-j;}
 			else{k=(fftw._FFT_samplesPerSlice)-(j-(fftw._FFT_samplesPerSlice/2));}
-			fftw._pwr_fftw_out[index*fftw._FFT_final_binperslice + j] += fftw._fftout[k][_Q_] * fftw._fftout[k][_Q_] + fftw._fftout[k][_I_] * fftw._fftout[k][_I_];
+			fftw._pwr_fftw_out[index*fftw._FFT_final_binperslice + (j-fftw._FFT_remove_binperslice/2)] += fftw._fftout[k][_Q_] * fftw._fftout[k][_Q_] + fftw._fftout[k][_I_] * fftw._fftout[k][_I_];
 		}
 	}
 	
@@ -503,8 +501,8 @@ void ReadAndRun(){
 		switch (globals._output_format) {
 			case _TXT_FORMAT_:
 				fichier = fopen(filename, "w");
-				for (int i = 0; i < fftw._FFT_final_binTotal; i++) {
-					fprintf(fichier, "%d %f\n", rtl._freq_start_with_overlap + (i * fftw._bin_width), fftw._dB_fftw_out[i]);
+				for (int i = 0; i < fftw._FFT_final_binTotal_Without_excess; i++) {
+					fprintf(fichier, "%d %f\n", rtl._freq_start + (i * fftw._bin_width), fftw._dB_fftw_out[i]);
 				}
 				fclose(fichier);
 				break;
@@ -516,7 +514,7 @@ void ReadAndRun(){
 				break;
 			case _RAW_FORMAT_:
 				fichier = fopen(filename, "wb");
-				fwrite(fftw._dB_fftw_out, sizeof(double), fftw._FFT_final_binTotal, fichier);
+				fwrite(fftw._dB_fftw_out, sizeof(double), fftw._FFT_final_binTotal_Without_excess, fichier);
 				fclose(fichier);
 				break;
 			default:
@@ -527,12 +525,12 @@ void ReadAndRun(){
 		switch (globals._output_format) {
 			case _TXT_FORMAT_:
 				if(globals._gnuplot){printf("e\nplot \"-\"\n");}
-				for (int i = 0; i < fftw._FFT_final_binTotal; i++) {
-					printf("%d %f\n", rtl._freq_start_with_overlap + (i * fftw._bin_width), fftw._dB_fftw_out[i]); 
+				for (int i = 0; i < fftw._FFT_final_binTotal_Without_excess; i++) {
+					printf("%d %f\n", rtl._freq_start + (i * fftw._bin_width), fftw._dB_fftw_out[i]); 
 				}
 				break;
 			case _RAW_FORMAT_:
-				fwrite(fftw._dB_fftw_out, sizeof(double), fftw._FFT_final_binTotal, stdout);
+				fwrite(fftw._dB_fftw_out, sizeof(double), fftw._FFT_final_binTotal_Without_excess, stdout);
 				break;
 			default:
 				break;
@@ -544,13 +542,15 @@ void VarAndBuffInit(){
 	
 	fftPlan = fftw_plan_dft_1d((rtl._rate / fftw._bin_width), NULL, NULL, FFTW_BACKWARD, FFTW_ESTIMATE);
 
-	fftw._FFT_numSlices = (rtl._freq_stop - rtl._freq_start) / (rtl._rate-(rtl._rate*fftw._FFT_overlap)/100);
+	fftw._FFT_numSlices = (rtl._freq_stop_adjusted - rtl._freq_start) / (rtl._rate-(rtl._rate*fftw._FFT_overlap)/100);
 	fftw._FFT_samplesPerSlice = (rtl._rate / fftw._bin_width); // /2 because fftw_complex is I/Q
 	fftw._SPS_numSlices = fftw._FFT_numSlices * fftw._avg;
 	fftw._SPS_samplesPerSlice = fftw._FFT_samplesPerSlice * 2;// *2 beacause 1 sample = 2 byte I/Q
 	fftw._FFT_remove_binperslice = (fftw._FFT_samplesPerSlice*fftw._FFT_overlap)/100;
 	fftw._FFT_final_binperslice = fftw._FFT_samplesPerSlice - fftw._FFT_remove_binperslice;
-	fftw._FFT_final_binTotal = fftw._FFT_numSlices*fftw._FFT_final_binperslice + fftw._FFT_remove_binperslice;
+	fftw._FFT_final_binTotal = fftw._FFT_numSlices*fftw._FFT_final_binperslice;
+	fftw._FFT_final_binTotal_Without_excess = fftw._FFT_final_binTotal - (rtl._freq_stop_adjusted - rtl._freq_stop)/ fftw._bin_width;
+
 	
 	rtl._currentFreq = (int *)malloc(fftw._SPS_numSlices * sizeof(int));
 	if (rtl._currentFreq == NULL) {
@@ -637,7 +637,6 @@ void VarAndBuffInit(){
 	
 	printf("(rtl._freq_stop_with_overlap - rtl._freq_start_with_overlap + )/ fftw._bin_width = fftw._FFT_final_binTotal\n");
 	printf("(%d - %d)/ %d = %d\n",rtl._freq_stop_with_overlap, rtl._freq_start_with_overlap, fftw._bin_width,fftw._FFT_final_binTotal);
-
 }
 
 void VarAndBuffDeInit(){
