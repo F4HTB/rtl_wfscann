@@ -20,6 +20,8 @@ struct globalsinfo{
 	int _interval_seconds = -1;
 	time_t _start_time;
 	time_t _elapsed_time;
+	bool _test = 0;
+	struct timeval _test_start_time, _test_end_time;
 }globals;
 
 //##################################RTL variables
@@ -30,8 +32,8 @@ struct rtlinfo{
 	int _freq_start = 144000000; 
 	int _freq_stop = 146000000; 
 	int _freq_start_with_overlap = 144000000; 
-	int _freq_stop_with_overlap = 146048000; 
-	int _freq_stop_adjusted = 146048000;
+	int _freq_stop_real = 146048000; 
+	int _freq_stop_adjusted_with_overlap = 146048000;
 	int _gain = 0; 
 	int _ppm = 0;
 	uint8_t **_samplesBuffer;
@@ -82,38 +84,47 @@ static int rtlsdr_init(){
 		fprintf(stderr, "\n#No supported devices found.\n");
 		exit(1);
 	}
-	printf("#Starting rtl_map ~\n");
-	printf("#Found %d device(s):\n", device_count);
-	for(int i = 0; i < device_count; i++){
-		printf("#%d: %s\n", i, rtlsdr_get_device_name(i));
+	if(globals._test)
+	{
+		printf("#Starting rtl_map ~");
+		printf("\n#Found %d device(s):", device_count);
+		for(int i = 0; i < device_count; i++){
+			printf(" %d: %s ", i, rtlsdr_get_device_name(i));
+		}
+		printf("\n");
 	}
 	int dev_open = rtlsdr_open(&rtl_dev, rtl._device);
 	if (dev_open < 0) {
 		fprintf(stderr, "\n#Failed to open RTL-SDR device #%d\n", rtl._device);
 		exit(1);
 	}else{
-		printf("#Using device: #%d\n", dev_open);
+		if(globals._test){printf("#Using device: %d\n", dev_open);}
 	}
 	if(!rtl._gain){
 		rtlsdr_set_tuner_gain_mode(rtl_dev, rtl._gain);
-		printf("#Gain mode set to auto.\n");
+		if(globals._test){printf("#Gain mode set to auto.\n");}
 	}else{
 		rtlsdr_set_tuner_gain_mode(rtl_dev, 1);
 		int gain_count = rtlsdr_get_tuner_gains(rtl_dev, NULL);
-		printf("#Supported gain values (%d): ", gain_count);
+		if(globals._test){printf("#Supported gain values (%d): ", gain_count);}
 		int gains[gain_count], supported_gains = rtlsdr_get_tuner_gains(rtl_dev, gains), target_gain=0;
 		for (int i = 0; i < supported_gains; i++){
 			if (gains[i] < rtl._gain*10){target_gain = gains[i];}
+			if(globals._test){printf(" %.2f ", gains[i]/10.0);}
 		}
-		printf("\n");
-		printf("#Gain set to %.1f\n", target_gain / 10.0);
+		if(globals._test){
+			printf("\n");
+			printf("#Gain set to %.1f\n", target_gain / 10.0);
+		}
 		rtlsdr_set_tuner_gain(rtl_dev, target_gain);
 	}
 	rtlsdr_set_freq_correction(rtl_dev, rtl._ppm);
 	rtlsdr_set_center_freq(rtl_dev, rtl._freq_start);
 	rtlsdr_set_sample_rate(rtl_dev, rtl._rate);
-	printf("#Frequency start set to %d Hz.\n", rtl._freq_start);
-	printf("#Sampling at %d sps\n", rtl._rate);
+	if(globals._test){
+		printf("#Frequency start set to %d Hz.\n", rtl._freq_start);
+		printf("#Sampling at %d sps\n", rtl._rate);
+	}
 	int r = rtlsdr_reset_buffer(rtl_dev);
 	if (r < 0){
 		fprintf(stderr, "\n#Failed to reset buffers.\n");
@@ -298,13 +309,9 @@ void validateFreqOption(char *freqRange) {
 
 	int adjustedBandwidth = 0;
 	while((rtl._freq_start+adjustedBandwidth*(rtl._rate-(rtl._rate*fftw._FFT_overlap)/100))<rtl._freq_stop)adjustedBandwidth++;
-	rtl._freq_stop_adjusted = rtl._freq_start+adjustedBandwidth*(rtl._rate-(rtl._rate*fftw._FFT_overlap)/100);
+	rtl._freq_stop_adjusted_with_overlap = rtl._freq_start+adjustedBandwidth*(rtl._rate-(rtl._rate*fftw._FFT_overlap)/100);
 	
-	rtl._freq_stop_with_overlap = rtl._freq_stop_adjusted + (rtl._rate*(fftw._FFT_overlap/2))/100; 
-
-    printf("#Frequency start : %dhz / overlap to %dhz \n", rtl._freq_start, rtl._freq_start_with_overlap);
-    printf("#Frequency stop  : %dhz / adjusted at adjusted to %dhz and overlap to %dhz \n", rtl._freq_stop, rtl._freq_stop_adjusted, rtl._freq_stop_with_overlap);
-    printf("#FFT final %d binaries width: %d\n", (rtl._freq_stop - rtl._freq_start)/fftw._bin_width,fftw._bin_width);
+	rtl._freq_stop_real = rtl._freq_stop_adjusted_with_overlap + (rtl._rate*(fftw._FFT_overlap/2))/100; 
 }
 
 void validateFormatOption(const char *format) {
@@ -486,7 +493,7 @@ void ReadAndRun(){
 		}
 	}
 	
-	for (int i = 0; i < fftw._FFT_final_binTotal; i++) {
+	for (int i = 0; i < fftw._FFT_final_binTotal_Without_excess; i++) {
 		fftw._dB_fftw_out[i] = round(((10*log10(fftw._pwr_fftw_out[i]/fftw._avg))+ db_adc_rtl_factor)* 100) / 100;
 	}
 	
@@ -542,15 +549,52 @@ void VarAndBuffInit(){
 	
 	fftPlan = fftw_plan_dft_1d((rtl._rate / fftw._bin_width), NULL, NULL, FFTW_BACKWARD, FFTW_ESTIMATE);
 
-	fftw._FFT_numSlices = (rtl._freq_stop_adjusted - rtl._freq_start) / (rtl._rate-(rtl._rate*fftw._FFT_overlap)/100);
+	fftw._FFT_numSlices = (rtl._freq_stop_adjusted_with_overlap - rtl._freq_start) / (rtl._rate-(rtl._rate*fftw._FFT_overlap)/100);
 	fftw._FFT_samplesPerSlice = (rtl._rate / fftw._bin_width); // /2 because fftw_complex is I/Q
 	fftw._SPS_numSlices = fftw._FFT_numSlices * fftw._avg;
 	fftw._SPS_samplesPerSlice = fftw._FFT_samplesPerSlice * 2;// *2 beacause 1 sample = 2 byte I/Q
 	fftw._FFT_remove_binperslice = (fftw._FFT_samplesPerSlice*fftw._FFT_overlap)/100;
 	fftw._FFT_final_binperslice = fftw._FFT_samplesPerSlice - fftw._FFT_remove_binperslice;
 	fftw._FFT_final_binTotal = fftw._FFT_numSlices*fftw._FFT_final_binperslice;
-	fftw._FFT_final_binTotal_Without_excess = fftw._FFT_final_binTotal - (rtl._freq_stop_adjusted - rtl._freq_stop)/ fftw._bin_width;
+	fftw._FFT_final_binTotal_Without_excess = (fftw._FFT_final_binTotal - (rtl._freq_stop_adjusted_with_overlap - rtl._freq_stop)/ fftw._bin_width);
 
+	if(globals._test)
+	{
+		printf("\n");
+		printf("##################################################################################\n");
+		printf("#\n");
+		printf("#1 Frequency start wanted : %dhz\n", rtl._freq_start);
+		printf("#2 Frequency start adjusted with overlap = real = \"Frequency start wanted\" - ((\"sample rate\"*(\"fft overlappercent\"/2))/100)\n");
+		printf("#2 %d - ((%d*(%d/2))/100) = %dhz\n",rtl._freq_start, rtl._rate, fftw._FFT_overlap, rtl._freq_start_with_overlap);
+		printf("#3 Frequency stop wanted : %dhz\n", rtl._freq_stop);
+		
+		printf("#4 Frequency stop adjusted with overlap = \"Frequency start wanted\" + \"number of slice\" * \"Frequency bandwidth per slice\"\n");	
+		printf("#4 Frequency stop adjusted with overlap = %d + %d * %d = %dhz\n",rtl._freq_start,fftw._FFT_numSlices,(rtl._rate-(rtl._rate*fftw._FFT_overlap)/100),rtl._freq_stop_adjusted_with_overlap);	
+		
+		printf("#5 Frequency stop real = \"Frequency start adjusted with overlap\" + \"number of slice\" * \"sample rate\" - (\"number of slice\" - 1) * \"frequency overlaped\" \n");
+		printf("#5 Frequency stop real = %d + %d * %d - %d * %d = %dhz\n",rtl._freq_start_with_overlap,fftw._FFT_numSlices,rtl._rate,fftw._FFT_numSlices-1,((rtl._rate*fftw._FFT_overlap)/100),rtl._freq_stop_real);
+		
+		printf("#5 Frequency overlap per scan bandwith (rlt sample rate): %d%% %dhz\n",fftw._FFT_overlap,(rtl._rate*(fftw._FFT_overlap))/100);
+		printf("#\n");
+		printf("#2  1                                  3    4   \n");
+		printf("#|__|---------|____|---------|____|----|----|__|\n");
+		printf("# 5/           5/\\5           5/\\5           \\5 \n");
+		printf("#\n");
+		printf("#RTL number of scan:%d with avg: %d\n",fftw._FFT_numSlices,fftw._SPS_numSlices);
+		printf("#RTL number of sample per scan:%d with avg: %d\n",fftw._SPS_samplesPerSlice/2, (fftw._SPS_samplesPerSlice/2) * fftw._avg);
+		printf("#RTL total number of sample %d\n",fftw._SPS_numSlices * fftw._avg * fftw._SPS_samplesPerSlice/2);
+		printf("#\n");
+		printf("#FFT number of fftw to compute %d with avg %d\n",fftw._FFT_numSlices, fftw._FFT_numSlices * fftw._avg);
+		printf("#FFT number of bin per fftw %d with avg %d\n",fftw._FFT_samplesPerSlice, fftw._FFT_samplesPerSlice * fftw._avg);	
+		printf("#FFT total number of bin with avg %d\n", fftw._FFT_samplesPerSlice * fftw._avg * fftw._FFT_numSlices);	
+		printf("#FFT number of bin to remove per fft for overlap %d\n",fftw._FFT_remove_binperslice);
+		printf("#FFT number of fft bin after overlap %d\n",fftw._FFT_final_binperslice);	
+		printf("#FFT total number of fft bin after overlap %d\n",fftw._FFT_final_binTotal);	
+		printf("#FFT total number of fft bin to stop frequency %d\n",fftw._FFT_final_binTotal_Without_excess);
+		printf("#FFT total number of fft bin that not finaly computed %d\n",fftw._FFT_final_binTotal_Without_excess-fftw._FFT_final_binTotal);
+		printf("#\n");		
+		printf("##################################################################################\n\n");
+	}
 	
 	rtl._currentFreq = (int *)malloc(fftw._SPS_numSlices * sizeof(int));
 	if (rtl._currentFreq == NULL) {
@@ -610,7 +654,7 @@ void VarAndBuffInit(){
 		exit(1);
 	}
 	
-	fftw._dB_fftw_out = (double *)calloc(fftw._FFT_final_binTotal,sizeof(double));
+	fftw._dB_fftw_out = (double *)calloc(fftw._FFT_final_binTotal_Without_excess,sizeof(double));
 	if (fftw._dB_fftw_out == NULL) {
 		fprintf(stderr, "\n#Memory allocation error for fft power values in dB.\n");
 		exit(1);
@@ -627,16 +671,15 @@ void VarAndBuffInit(){
 			fprintf(stderr, "\n#Impossible to open the file.\n");
 			exit(1);
 		}
-		fprintf(fichier, "freq_start:%d\nfreq_stop:%d\nbin_bandwith:%d\ntotal_samples:%d\n", rtl._freq_start, rtl._freq_stop,fftw._bin_width,fftw._FFT_final_binTotal);
+		fprintf(fichier, "freq_start:%d\nfreq_stop:%d\nbin_bandwith:%d\ntotal_samples:%d\n", rtl._freq_start, rtl._freq_stop,fftw._bin_width,fftw._FFT_final_binTotal_Without_excess);
 		fclose(fichier);
 		
 		if(globals._output_format == _IMG_FORMAT_){
-				Init_image_data(fftw._FFT_final_binTotal);
+				Init_image_data(fftw._FFT_final_binTotal_Without_excess);
 		}
 	}
 	
-	printf("(rtl._freq_stop_with_overlap - rtl._freq_start_with_overlap + )/ fftw._bin_width = fftw._FFT_final_binTotal\n");
-	printf("(%d - %d)/ %d = %d\n",rtl._freq_stop_with_overlap, rtl._freq_start_with_overlap, fftw._bin_width,fftw._FFT_final_binTotal);
+
 }
 
 void VarAndBuffDeInit(){
@@ -683,11 +726,12 @@ int main(int argc, char * argv[]) {
 			{"interval", required_argument, 0, 'I'},
 			{"format", required_argument, 0, 'F'},
 			{"truncatefile", no_argument, 0, 'T'},
+			{"test", no_argument, 0, 't'},
 			{0, 0, 0, 0}
         };
 	int option_index = 0;
 
-    while ((x = getopt_long(argc, argv, "hcd:f:g:p:r:w:a:GO:I:F:T", long_options, &option_index)) != -1){
+    while ((x = getopt_long(argc, argv, "hcd:f:g:p:r:w:a:GO:I:F:Tt", long_options, &option_index)) != -1){
         switch (x) {
         case 'h':
             help();
@@ -733,6 +777,9 @@ int main(int argc, char * argv[]) {
 		case 'T':
 			globals._truncatefile = 1;
 			break;
+		case 't':
+			globals._test = 1;
+			break;
         default:
             help();
             exit(0);
@@ -742,7 +789,15 @@ int main(int argc, char * argv[]) {
 	rtlsdr_init();
 	VarAndBuffInit();
 	bool cont = 1;
+
+
+	
 	while (cont) {
+		
+		if(globals._test){
+			gettimeofday(&globals._test_start_time, NULL);
+		}
+		
 		globals._start_time = time(NULL);
 		ReadAndRun();
 		if (globals._interval_seconds > 0) {
@@ -756,6 +811,14 @@ int main(int argc, char * argv[]) {
 		}
 		
 		cont = globals._continually;
+		
+		if(globals._test){
+			gettimeofday(&globals._test_end_time, NULL);
+			long elapsed_time = (globals._test_end_time.tv_sec - globals._test_start_time.tv_sec) * 1000000L + (globals._test_end_time.tv_usec - globals._test_start_time.tv_usec);
+			double elapsed_time_seconds = (double)elapsed_time / 1000000.0;
+			printf("#Temps d'exécution : %.6f microsecondes\n", elapsed_time_seconds);
+		}
+
 	}
 	
 	VarAndBuffDeInit();
