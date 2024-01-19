@@ -188,7 +188,7 @@ void convert_db_data_to_image_png(FILE *fp,double* fftw_data)
 	size_t bytesRead = fread(&bmp, 1, sizeof(BITMAPHEADER), fp);
 	
 	if (bytesRead && bmp.bfType == 0x4D42) {
-		bmp.biHeight = bmp.biHeight+1;
+		bmp.biHeight = bmp.biHeight-1;
 		size = bmp.biWidth * bmp.biHeight * 3;
         bmp.bfSize = size + sizeof(BITMAPHEADER);
 		bmp.bfOffBits = sizeof(BITMAPHEADER);
@@ -203,7 +203,7 @@ void convert_db_data_to_image_png(FILE *fp,double* fftw_data)
 		bmp.bfOffBits = sizeof(BITMAPHEADER);
 		bmp.biSize = 40;
 		bmp.biWidth = Image._width;
-		bmp.biHeight = Image._height;
+		bmp.biHeight = -Image._height;
 		bmp.biPlanes = 1;
 		bmp.biBitCount = 24; 
 		bmp.biCompress = 0;
