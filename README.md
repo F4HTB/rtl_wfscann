@@ -45,4 +45,4 @@ For IMG, no auto scale function because loss of performance.
 In progress.
 The waterfall generation tool is working at this time.
 
-The python part for the web server is in progress
+The python part for the web server is in progress.
