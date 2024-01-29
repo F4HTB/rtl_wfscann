@@ -41,3 +41,8 @@ TXT is for view freq v value, IMG is more viewable, RAW is bether for save value
 For IMG, no auto scale function because loss of performance.
 
 ```
+
+In progress.
+The waterfall generation tool is working at this time.
+
+The python part for the web server is in progress
